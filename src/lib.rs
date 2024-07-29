@@ -154,10 +154,11 @@ impl TemplateDatabase {
     pub fn get_substitutes(&self, template: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.db.prepare(
             "SELECT substitutes.name
-         FROM substitutes
-         INNER JOIN templates
-         ON templates.id = substitutes.template_id
-         WHERE templates.name = ?1;",
+             FROM substitutes
+             INNER JOIN templates
+             ON templates.id = substitutes.template_id
+             WHERE templates.name = ?1
+             ORDER BY LOWER(substitutes.name) ASC;",
         )?;
 
         let substitutes = stmt.query_map(&[template], |row| row.get(0))?;
@@ -174,7 +175,8 @@ impl TemplateDatabase {
     pub fn get_templates(&self) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.db.prepare(
             "SELECT templates.name
-         FROM templates;",
+             FROM templates
+             ORDER BY LOWER(templates.name) ASC;",
         )?;
 
         let templates = stmt.query_map([], |row| row.get(0))?;

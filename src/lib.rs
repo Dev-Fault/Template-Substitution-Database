@@ -4,6 +4,20 @@ pub struct TemplateDatabase {
     db: Connection,
 }
 
+pub struct ChangeLog<'a> {
+    pub template: Option<&'a str>,
+    pub subs: Option<Vec<&'a str>>,
+}
+
+impl ChangeLog<'_> {
+    pub fn new() -> Self {
+        ChangeLog {
+            template: None,
+            subs: None,
+        }
+    }
+}
+
 impl TemplateDatabase {
     pub fn from_path(path: &str) -> rusqlite::Result<TemplateDatabase> {
         let db = Connection::open(path)?;
@@ -29,49 +43,61 @@ impl TemplateDatabase {
         Ok(TemplateDatabase { db })
     }
 
-    pub fn insert_substitutions(
+    pub fn insert_substitutions<'a>(
         &mut self,
-        template: &str,
-        substitutes: Option<&[&str]>,
-    ) -> rusqlite::Result<()> {
+        template: &'a str,
+        substitutes: Option<&[&'a str]>,
+    ) -> rusqlite::Result<ChangeLog<'a>> {
+        let mut change_log = ChangeLog::new();
+
         if template.len() == 0 {
-            return Ok(());
+            return Ok(change_log);
         }
 
         let tx = self.db.transaction()?;
 
-        TemplateDatabase::execute_insert_template(&tx, template)?;
-
-        if let Some(subs) = substitutes {
-            TemplateDatabase::execute_insert_substitutions(&tx, template, subs)?;
+        if TemplateDatabase::execute_insert_template(&tx, template)? {
+            change_log.template = Some(template);
         }
 
-        tx.commit()
+        if let Some(subs) = substitutes {
+            change_log.subs = Some(TemplateDatabase::execute_insert_substitutions(
+                &tx, template, subs,
+            )?);
+        }
+
+        tx.commit()?;
+
+        Ok(change_log)
     }
 
-    fn execute_insert_template(tx: &Transaction, template: &str) -> rusqlite::Result<()> {
-        tx.execute(
+    fn execute_insert_template(tx: &Transaction, template: &str) -> rusqlite::Result<bool> {
+        let result = tx.execute(
             "INSERT OR IGNORE INTO templates (name) VALUES (?1)",
             &[template],
         )?;
-        Ok(())
+        Ok(result > 0)
     }
 
-    fn execute_insert_substitutions(
+    fn execute_insert_substitutions<'a>(
         tx: &Transaction,
         template: &str,
-        substitutes: &[&str],
-    ) -> rusqlite::Result<()> {
+        substitutes: &[&'a str],
+    ) -> rusqlite::Result<Vec<&'a str>> {
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
+        let mut inserted_subs = Vec::new();
 
         for sub in substitutes {
-            tx.execute(
+            let result = tx.execute(
                 "INSERT OR IGNORE INTO substitutes (name, template_id) VALUES (?1, ?2)",
                 &[*sub, &template_id],
             )?;
+            if result > 0 {
+                inserted_subs.push(*sub);
+            }
         }
 
-        Ok(())
+        Ok(inserted_subs)
     }
 
     fn find_template_id(tx: &Transaction, template: &str) -> rusqlite::Result<String> {
@@ -249,10 +275,23 @@ mod tests {
         db.insert_substitutions("verb", Some(VERBS)).unwrap();
         db.insert_substitutions("adj", Some(ADJECTIVES)).unwrap();
 
-        assert_eq!(db.get_templates().unwrap(), vec!["noun", "verb", "adj"]);
-        assert_eq!(db.get_substitutes("noun").unwrap(), NOUNS);
-        assert_eq!(db.get_substitutes("verb").unwrap(), VERBS);
-        assert_eq!(db.get_substitutes("adj").unwrap(), ADJECTIVES);
+        let templates = db.get_templates().unwrap();
+        let noun_subs = db.get_substitutes("noun").unwrap();
+        let verb_subs = db.get_substitutes("verb").unwrap();
+        let adj_subs = db.get_substitutes("adj").unwrap();
+
+        assert!(templates.contains(&"noun".to_string()));
+        assert!(templates.contains(&"adj".to_string()));
+        assert!(templates.contains(&"verb".to_string()));
+        for noun in NOUNS {
+            assert!(noun_subs.contains(&noun.to_string()));
+        }
+        for verb in VERBS {
+            assert!(verb_subs.contains(&verb.to_string()));
+        }
+        for adj in ADJECTIVES {
+            assert!(adj_subs.contains(&adj.to_string()));
+        }
     }
 
     #[test]

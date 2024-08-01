@@ -106,7 +106,7 @@ impl TemplateDatabase {
         Ok(template_id.to_string())
     }
 
-    pub fn remove_template(&mut self, template: &str) -> rusqlite::Result<()> {
+    pub fn remove_template(&mut self, template: &str) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
 
@@ -115,42 +115,56 @@ impl TemplateDatabase {
             [&template_id],
         )?;
 
-        tx.execute("DELETE FROM templates WHERE id = ?1", [&template_id])?;
+        let result = tx.execute("DELETE FROM templates WHERE id = ?1", [&template_id])?;
 
-        tx.commit()
+        tx.commit()?;
+
+        Ok(result > 0)
     }
 
-    pub fn remove_substitutes(
+    pub fn remove_substitutes<'a>(
         &mut self,
-        template: &str,
-        substitutes: &[&str],
-    ) -> rusqlite::Result<()> {
+        template: &'a str,
+        substitutes: &[&'a str],
+    ) -> rusqlite::Result<ChangeLog<'a>> {
         let tx = self.db.transaction()?;
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
 
+        let mut removed_subs = Vec::new();
+
         for sub in substitutes {
-            tx.execute(
+            let result = tx.execute(
                 "DELETE FROM substitutes WHERE template_id = ?1 AND name = ?2",
-                &[&template_id, &sub.to_string()],
+                &[&template_id, *sub],
             )?;
+            if result > 0 {
+                removed_subs.push(*sub);
+            }
         }
 
-        tx.commit()
+        tx.commit()?;
+
+        Ok(ChangeLog {
+            template: Some(template),
+            subs: Some(removed_subs),
+        })
     }
 
     pub fn rename_template(
         &mut self,
         old_template: &str,
         new_template: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
 
-        tx.execute(
+        let result = tx.execute(
             "UPDATE templates SET name = ?1 WHERE name = ?2",
             &[new_template, old_template],
         )?;
 
-        tx.commit()
+        tx.commit()?;
+
+        Ok(result > 0)
     }
 
     pub fn rename_substitute(
@@ -158,17 +172,19 @@ impl TemplateDatabase {
         template: &str,
         old_sub: &str,
         new_sub: &str,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
 
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
 
-        tx.execute(
+        let result = tx.execute(
             "UPDATE substitutes SET name = ?1 WHERE name = ?2 AND template_id = ?3",
             &[new_sub, old_sub, &template_id],
         )?;
 
-        tx.commit()
+        tx.commit()?;
+
+        Ok(result > 0)
     }
 
     pub fn clear(&self) -> rusqlite::Result<()> {

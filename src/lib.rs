@@ -6,16 +6,12 @@ pub struct TemplateDatabase {
 }
 
 pub struct ChangeLog<'a> {
-    pub template: Option<&'a str>,
-    pub subs: Option<Vec<&'a str>>,
+    pub subs: Vec<&'a str>,
 }
 
 impl ChangeLog<'_> {
     pub fn new() -> Self {
-        ChangeLog {
-            template: None,
-            subs: None,
-        }
+        ChangeLog { subs: Vec::new() }
     }
 }
 
@@ -24,18 +20,18 @@ impl TemplateDatabase {
         let db = Connection::open(path)?;
 
         db.execute(
-            "create table if not exists templates (
-            id integer primary key,
-            name text not null unique
+            "CREATE TABLE IF NOT EXISTS templates (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE
         )",
             [],
         )?;
 
         db.execute(
-            "create table if not exists substitutes (
-            id integer primary key,
-            name text not null,
-            template_id integer not null references templates(id),
+            "CREATE TABLE IF NOT EXISTS substitutes (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            template_id INTEGER NOT NULL REFERENCES templates(id),
             UNIQUE(name, template_id)
         )",
             [],
@@ -51,20 +47,12 @@ impl TemplateDatabase {
     ) -> rusqlite::Result<ChangeLog<'a>> {
         let mut change_log = ChangeLog::new();
 
-        if template.len() == 0 {
-            return Ok(change_log);
-        }
-
         let tx = self.db.transaction()?;
 
-        if TemplateDatabase::execute_insert_template(&tx, template)? {
-            change_log.template = Some(template);
-        }
+        TemplateDatabase::execute_insert_template(&tx, template)?;
 
         if let Some(subs) = substitutes {
-            change_log.subs = Some(TemplateDatabase::execute_insert_substitutions(
-                &tx, template, subs,
-            )?);
+            change_log = TemplateDatabase::execute_insert_substitutions(&tx, template, subs)?;
         }
 
         tx.commit()?;
@@ -72,21 +60,21 @@ impl TemplateDatabase {
         Ok(change_log)
     }
 
-    fn execute_insert_template(tx: &Transaction, template: &str) -> rusqlite::Result<bool> {
-        let result = tx.execute(
+    fn execute_insert_template(tx: &Transaction, template: &str) -> rusqlite::Result<()> {
+        tx.execute(
             "INSERT OR IGNORE INTO templates (name) VALUES (?1)",
             &[template],
         )?;
-        Ok(result > 0)
+        Ok(())
     }
 
     fn execute_insert_substitutions<'a>(
         tx: &Transaction,
         template: &str,
         substitutes: &[&'a str],
-    ) -> rusqlite::Result<Vec<&'a str>> {
+    ) -> rusqlite::Result<ChangeLog<'a>> {
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
-        let mut inserted_subs = Vec::new();
+        let mut change_log = ChangeLog::new();
 
         for sub in substitutes {
             let result = tx.execute(
@@ -94,11 +82,11 @@ impl TemplateDatabase {
                 &[*sub, &template_id],
             )?;
             if result > 0 {
-                inserted_subs.push(*sub);
+                change_log.subs.push(*sub);
             }
         }
 
-        Ok(inserted_subs)
+        Ok(change_log)
     }
 
     fn find_template_id(tx: &Transaction, template: &str) -> rusqlite::Result<String> {
@@ -131,7 +119,7 @@ impl TemplateDatabase {
         let tx = self.db.transaction()?;
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
 
-        let mut removed_subs = Vec::new();
+        let mut change_log = ChangeLog::new();
 
         for sub in substitutes {
             let result = tx.execute(
@@ -139,16 +127,13 @@ impl TemplateDatabase {
                 &[&template_id, *sub],
             )?;
             if result > 0 {
-                removed_subs.push(*sub);
+                change_log.subs.push(*sub);
             }
         }
 
         tx.commit()?;
 
-        Ok(ChangeLog {
-            template: Some(template),
-            subs: Some(removed_subs),
-        })
+        Ok(change_log)
     }
 
     pub fn rename_template(
@@ -309,17 +294,6 @@ mod tests {
         for adj in ADJECTIVES {
             assert!(adj_subs.contains(&adj.to_string()));
         }
-    }
-
-    #[test]
-    fn attempt_to_insert_empty_template() {
-        let mut db = TemplateDatabase::from_path("test3.db").unwrap();
-
-        db.insert_substitutions("", Some(&["slap"])).unwrap();
-
-        let empty: Vec<String> = Vec::new();
-
-        assert_eq!(empty, db.get_templates().unwrap());
     }
 
     #[test]

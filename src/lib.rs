@@ -1,3 +1,4 @@
+pub use rusqlite;
 use rusqlite::{Connection, Transaction};
 
 pub struct TemplateDatabase {

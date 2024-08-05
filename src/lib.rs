@@ -5,15 +5,7 @@ pub struct TemplateDatabase {
     db: Connection,
 }
 
-pub struct ChangeLog<'a> {
-    pub subs: Vec<&'a str>,
-}
-
-impl ChangeLog<'_> {
-    pub fn new() -> Self {
-        ChangeLog { subs: Vec::new() }
-    }
-}
+pub type UpdatedValues<'a> = Vec<&'a str>;
 
 impl TemplateDatabase {
     pub fn from_path(path: &str) -> rusqlite::Result<TemplateDatabase> {
@@ -44,8 +36,8 @@ impl TemplateDatabase {
         &mut self,
         template: &'a str,
         substitutes: Option<&[&'a str]>,
-    ) -> rusqlite::Result<ChangeLog<'a>> {
-        let mut change_log = ChangeLog::new();
+    ) -> rusqlite::Result<UpdatedValues<'a>> {
+        let mut change_log = UpdatedValues::new();
 
         let tx = self.db.transaction()?;
 
@@ -72,9 +64,9 @@ impl TemplateDatabase {
         tx: &Transaction,
         template: &str,
         substitutes: &[&'a str],
-    ) -> rusqlite::Result<ChangeLog<'a>> {
+    ) -> rusqlite::Result<UpdatedValues<'a>> {
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
-        let mut change_log = ChangeLog::new();
+        let mut inserted_subs = UpdatedValues::new();
 
         for sub in substitutes {
             let result = tx.execute(
@@ -82,11 +74,11 @@ impl TemplateDatabase {
                 &[*sub, &template_id],
             )?;
             if result > 0 {
-                change_log.subs.push(*sub);
+                inserted_subs.push(*sub);
             }
         }
 
-        Ok(change_log)
+        Ok(inserted_subs)
     }
 
     fn find_template_id(tx: &Transaction, template: &str) -> rusqlite::Result<String> {
@@ -115,11 +107,11 @@ impl TemplateDatabase {
         &mut self,
         template: &'a str,
         substitutes: &[&'a str],
-    ) -> rusqlite::Result<ChangeLog<'a>> {
+    ) -> rusqlite::Result<UpdatedValues<'a>> {
         let tx = self.db.transaction()?;
         let template_id = TemplateDatabase::find_template_id(&tx, template)?;
 
-        let mut change_log = ChangeLog::new();
+        let mut removed_subs = UpdatedValues::new();
 
         for sub in substitutes {
             let result = tx.execute(
@@ -127,13 +119,13 @@ impl TemplateDatabase {
                 &[&template_id, *sub],
             )?;
             if result > 0 {
-                change_log.subs.push(*sub);
+                removed_subs.push(*sub);
             }
         }
 
         tx.commit()?;
 
-        Ok(change_log)
+        Ok(removed_subs)
     }
 
     pub fn rename_template(

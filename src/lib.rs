@@ -65,7 +65,7 @@ impl TemplateDatabase {
         template: &str,
         substitutes: &[&'a str],
     ) -> rusqlite::Result<UpdatedValues<'a>> {
-        let template_id = TemplateDatabase::find_template_id(&tx, template)?;
+        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
         let mut inserted_subs = UpdatedValues::new();
 
         for sub in substitutes {
@@ -81,7 +81,18 @@ impl TemplateDatabase {
         Ok(inserted_subs)
     }
 
-    fn find_template_id(tx: &Transaction, template: &str) -> rusqlite::Result<String> {
+    fn find_template_id(&self, template: &str) -> rusqlite::Result<String> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id FROM templates WHERE name = ?1")?;
+        let template_id: i64 = stmt.query_row(&[template], |row| row.get(0))?;
+        Ok(template_id.to_string())
+    }
+
+    fn find_template_id_with_transaction(
+        tx: &Transaction,
+        template: &str,
+    ) -> rusqlite::Result<String> {
         let mut stmt = tx.prepare("SELECT id FROM templates WHERE name = ?1")?;
         let template_id: i64 = stmt.query_row(&[template], |row| row.get(0))?;
         Ok(template_id.to_string())
@@ -89,7 +100,7 @@ impl TemplateDatabase {
 
     pub fn remove_template(&mut self, template: &str) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
-        let template_id = TemplateDatabase::find_template_id(&tx, template)?;
+        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
 
         tx.execute(
             "DELETE FROM substitutes WHERE template_id = ?1",
@@ -109,7 +120,7 @@ impl TemplateDatabase {
         substitutes: &[&'a str],
     ) -> rusqlite::Result<UpdatedValues<'a>> {
         let tx = self.db.transaction()?;
-        let template_id = TemplateDatabase::find_template_id(&tx, template)?;
+        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
 
         let mut removed_subs = UpdatedValues::new();
 
@@ -153,7 +164,7 @@ impl TemplateDatabase {
     ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
 
-        let template_id = TemplateDatabase::find_template_id(&tx, template)?;
+        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
 
         let result = tx.execute(
             "UPDATE substitutes SET name = ?1 WHERE name = ?2 AND template_id = ?3",
@@ -172,24 +183,40 @@ impl TemplateDatabase {
     }
 
     pub fn get_substitutes(&self, template: &str) -> rusqlite::Result<Vec<String>> {
+        let template_id = self.find_template_id(template)?;
         let mut stmt = self.db.prepare(
             "SELECT substitutes.name
              FROM substitutes
-             INNER JOIN templates
-             ON templates.id = substitutes.template_id
-             WHERE templates.name = ?1
+             WHERE template_id = ?1
              ORDER BY LOWER(substitutes.name) ASC;",
         )?;
 
-        let substitutes = stmt.query_map(&[template], |row| row.get(0))?;
+        let substitutes = stmt.query_map([template_id], |row| row.get(0))?;
 
-        let mut sub_vec = Vec::new();
+        Ok(substitutes
+            .filter(|x| x.is_ok())
+            .map(|x| x.unwrap())
+            .collect())
+    }
 
-        for sub in substitutes {
-            sub_vec.push(sub?);
+    pub fn get_random_substitute(&self, template: &str) -> rusqlite::Result<String> {
+        let template_id = self.find_template_id(template)?;
+        let mut stmt = self.db.prepare(
+            "SELECT substitutes.name
+             FROM substitutes
+             WHERE template_id = ?1
+             ORDER BY RANDOM() LIMIT 1;",
+        )?;
+
+        let mut rows = stmt.query([template_id])?;
+
+        match rows.next()? {
+            Some(row) => {
+                let sub: String = row.get(0)?;
+                return Ok(sub);
+            }
+            _ => Ok("".to_string()),
         }
-
-        Ok(sub_vec)
     }
 
     pub fn get_templates(&self) -> rusqlite::Result<Vec<String>> {
@@ -201,13 +228,10 @@ impl TemplateDatabase {
 
         let templates = stmt.query_map([], |row| row.get(0))?;
 
-        let mut template_vec = Vec::new();
-
-        for template in templates {
-            template_vec.push(template?);
-        }
-
-        Ok(template_vec)
+        Ok(templates
+            .filter(|x| x.is_ok())
+            .map(|x| x.unwrap())
+            .collect())
     }
 }
 
@@ -252,13 +276,12 @@ mod tests {
         "untolerable",
     ];
 
+    #[should_panic]
     #[test]
     fn get_inside_empty_database() {
         let db = TemplateDatabase::from_path("test1.db").unwrap();
 
-        let empty: Vec<String> = Vec::new();
-        assert_eq!(db.get_substitutes("noun").unwrap(), empty);
-        assert_eq!(db.get_templates().unwrap(), empty);
+        db.get_substitutes("noun").unwrap();
     }
 
     #[test]

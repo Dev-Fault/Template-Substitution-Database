@@ -32,7 +32,24 @@ impl TemplateDatabase {
         Ok(TemplateDatabase { db })
     }
 
-    pub fn insert_substitutions<'a>(
+    pub fn insert_sub<'a>(
+        &mut self,
+        template: &'a str,
+        substitute: &'a str,
+    ) -> rusqlite::Result<bool> {
+        let tx = self.db.transaction()?;
+        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let result = tx.execute(
+            "INSERT OR IGNORE INTO substitutes (name, template_id) VALUES (?1, ?2)",
+            [substitute.to_string(), template_id.to_string()],
+        )?;
+
+        tx.commit()?;
+
+        Ok(result > 0)
+    }
+
+    pub fn insert_subs<'a>(
         &mut self,
         template: &'a str,
         substitutes: Option<&[&'a str]>,
@@ -44,7 +61,7 @@ impl TemplateDatabase {
         TemplateDatabase::execute_insert_template(&tx, template)?;
 
         if let Some(subs) = substitutes {
-            change_log = TemplateDatabase::execute_insert_substitutions(&tx, template, subs)?;
+            change_log = TemplateDatabase::execute_insert_subs(&tx, template, subs)?;
         }
 
         tx.commit()?;
@@ -60,7 +77,7 @@ impl TemplateDatabase {
         Ok(())
     }
 
-    fn execute_insert_substitutions<'a>(
+    fn execute_insert_subs<'a>(
         tx: &Transaction,
         template: &str,
         substitutes: &[&'a str],
@@ -114,7 +131,25 @@ impl TemplateDatabase {
         Ok(result > 0)
     }
 
-    pub fn remove_substitutes<'a>(
+    pub fn remove_sub<'a>(
+        &mut self,
+        template: &'a str,
+        substitute: &'a str,
+    ) -> rusqlite::Result<bool> {
+        let tx = self.db.transaction()?;
+        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+
+        let result = tx.execute(
+            "DELETE FROM substitutes WHERE template_id = ?1 AND name = ?2",
+            &[&template_id, substitute],
+        )?;
+
+        tx.commit()?;
+
+        Ok(result > 0)
+    }
+
+    pub fn remove_subs<'a>(
         &mut self,
         template: &'a str,
         substitutes: &[&'a str],
@@ -182,7 +217,7 @@ impl TemplateDatabase {
         Ok(())
     }
 
-    pub fn get_substitutes(&self, template: &str) -> rusqlite::Result<Vec<String>> {
+    pub fn get_subs(&self, template: &str) -> rusqlite::Result<Vec<String>> {
         let template_id = self.find_template_id(template)?;
         let mut stmt = self.db.prepare(
             "SELECT substitutes.name
@@ -199,7 +234,7 @@ impl TemplateDatabase {
             .collect())
     }
 
-    pub fn get_random_substitute(&self, template: &str) -> rusqlite::Result<String> {
+    pub fn get_random_subs(&self, template: &str) -> rusqlite::Result<String> {
         let template_id = self.find_template_id(template)?;
         let mut stmt = self.db.prepare(
             "SELECT substitutes.name
@@ -281,21 +316,21 @@ mod tests {
     fn get_inside_empty_database() {
         let db = TemplateDatabase::from_path("test1.db").unwrap();
 
-        db.get_substitutes("noun").unwrap();
+        db.get_subs("noun").unwrap();
     }
 
     #[test]
     fn insert_new_templates_with_subtitutions() {
         let mut db = TemplateDatabase::from_path("test2.db").unwrap();
 
-        db.insert_substitutions("noun", Some(NOUNS)).unwrap();
-        db.insert_substitutions("verb", Some(VERBS)).unwrap();
-        db.insert_substitutions("adj", Some(ADJECTIVES)).unwrap();
+        db.insert_subs("noun", Some(NOUNS)).unwrap();
+        db.insert_subs("verb", Some(VERBS)).unwrap();
+        db.insert_subs("adj", Some(ADJECTIVES)).unwrap();
 
         let templates = db.get_templates().unwrap();
-        let noun_subs = db.get_substitutes("noun").unwrap();
-        let verb_subs = db.get_substitutes("verb").unwrap();
-        let adj_subs = db.get_substitutes("adj").unwrap();
+        let noun_subs = db.get_subs("noun").unwrap();
+        let verb_subs = db.get_subs("verb").unwrap();
+        let adj_subs = db.get_subs("adj").unwrap();
 
         assert!(templates.contains(&"noun".to_string()));
         assert!(templates.contains(&"adj".to_string()));
@@ -315,49 +350,44 @@ mod tests {
     fn insert_only_template() {
         let mut db = TemplateDatabase::from_path("test4.db").unwrap();
 
-        db.insert_substitutions("template-with-no-subs", Some(&[]))
-            .unwrap();
+        db.insert_subs("template-with-no-subs", Some(&[])).unwrap();
 
         let empty: Vec<String> = Vec::new();
-        assert_eq!(db.get_substitutes("template-with-no-subs").unwrap(), empty);
+        assert_eq!(db.get_subs("template-with-no-subs").unwrap(), empty);
     }
 
     #[test]
     fn remove_substitutes() {
         let mut db = TemplateDatabase::from_path("test5.db").unwrap();
 
-        db.insert_substitutions("noun", Some(NOUNS)).unwrap();
+        db.insert_subs("noun", Some(NOUNS)).unwrap();
 
-        assert_eq!(db.get_substitutes("noun").unwrap().len(), NOUNS.len());
+        assert_eq!(db.get_subs("noun").unwrap().len(), NOUNS.len());
 
         let empty: Vec<String> = Vec::new();
 
-        db.remove_substitutes("noun", NOUNS).unwrap();
+        db.remove_subs("noun", NOUNS).unwrap();
 
-        assert_eq!(db.get_substitutes("noun").unwrap(), empty);
+        assert_eq!(db.get_subs("noun").unwrap(), empty);
 
-        db.insert_substitutions("verb", Some(VERBS)).unwrap();
+        db.insert_subs("verb", Some(VERBS)).unwrap();
 
-        assert_eq!(db.get_substitutes("verb").unwrap().len(), VERBS.len());
+        assert_eq!(db.get_subs("verb").unwrap().len(), VERBS.len());
 
-        db.remove_substitutes("verb", &["JAFLJE;LSFKALESF"])
-            .unwrap();
+        db.remove_subs("verb", &["JAFLJE;LSFKALESF"]).unwrap();
 
-        db.remove_substitutes("verb", &["jump"]).unwrap();
+        db.remove_subs("verb", &["jump"]).unwrap();
 
-        assert!(!db
-            .get_substitutes("verb")
-            .unwrap()
-            .contains(&"jump".to_string()));
+        assert!(!db.get_subs("verb").unwrap().contains(&"jump".to_string()));
     }
 
     #[test]
     fn remove_template() {
         let mut db = TemplateDatabase::from_path("test6.db").unwrap();
 
-        db.insert_substitutions("noun", Some(NOUNS)).unwrap();
+        db.insert_subs("noun", Some(NOUNS)).unwrap();
 
-        assert_eq!(db.get_substitutes("noun").unwrap().len(), NOUNS.len());
+        assert_eq!(db.get_subs("noun").unwrap().len(), NOUNS.len());
 
         db.remove_template("noun").unwrap();
 
@@ -387,7 +417,7 @@ mod tests {
 
         db.clear().unwrap();
 
-        db.insert_substitutions("noun", Some(NOUNS)).unwrap();
+        db.insert_subs("noun", Some(NOUNS)).unwrap();
 
         db.rename_template("noun", "new-nouns").unwrap();
 
@@ -400,10 +430,10 @@ mod tests {
 
         db.clear().unwrap();
 
-        db.insert_substitutions("noun", Some(&["example", "example2"]))
+        db.insert_subs("noun", Some(&["example", "example2"]))
             .unwrap();
 
-        db.insert_substitutions("noun2", Some(&["example", "example2"]))
+        db.insert_subs("noun2", Some(&["example", "example2"]))
             .unwrap();
     }
 
@@ -413,15 +443,12 @@ mod tests {
 
         db.clear().unwrap();
 
-        db.insert_substitutions("noun", Some(&["example", "example2"]))
+        db.insert_subs("noun", Some(&["example", "example2"]))
             .unwrap();
 
-        db.insert_substitutions("noun", Some(&["example", "example2"]))
+        db.insert_subs("noun", Some(&["example", "example2"]))
             .unwrap();
 
-        assert_eq!(
-            db.get_substitutes("noun").unwrap(),
-            &["example", "example2"]
-        );
+        assert_eq!(db.get_subs("noun").unwrap(), &["example", "example2"]);
     }
 }

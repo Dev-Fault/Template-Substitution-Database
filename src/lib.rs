@@ -1,6 +1,8 @@
 pub use rusqlite;
 use rusqlite::{Connection, Transaction};
 
+const DATABASE_VERSION: i32 = 1;
+
 pub struct TemplateDatabase {
     db: Connection,
 }
@@ -8,28 +10,137 @@ pub struct TemplateDatabase {
 pub type UpdatedValues<'a> = Vec<&'a str>;
 
 impl TemplateDatabase {
-    pub fn from_path(path: &str) -> rusqlite::Result<TemplateDatabase> {
-        let db = Connection::open(path)?;
-
+    fn create_tables(db: &Connection) -> rusqlite::Result<()> {
         db.execute(
-            "CREATE TABLE IF NOT EXISTS templates (
+            "
+            CREATE TABLE IF NOT EXISTS templates (
             id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE
         )",
             [],
         )?;
 
         db.execute(
-            "CREATE TABLE IF NOT EXISTS substitutes (
+            "
+            CREATE TABLE IF NOT EXISTS substitutes (
             id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
+            name TEXT NOT NULL COLLATE NOCASE,
             template_id INTEGER NOT NULL REFERENCES templates(id),
             UNIQUE(name, template_id)
         )",
             [],
         )?;
 
+        Ok(())
+    }
+
+    fn initialize_db(db: &Connection) -> rusqlite::Result<()> {
+        let mut stmt =
+            db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='templates'")?;
+
+        if stmt.query([])?.next()?.is_some() {
+            let version = Self::get_schema_version(db)?;
+
+            match version {
+                0 => Self::upgrade_to_version_1(db)?,
+                _ => {}
+            }
+        } else {
+            Self::set_schema_version(db, DATABASE_VERSION)?;
+            Self::create_tables(&db)?;
+        }
+        Ok(())
+    }
+
+    fn get_schema_version(db: &Connection) -> rusqlite::Result<i32> {
+        let version: i32 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok(version)
+    }
+
+    fn set_schema_version(db: &Connection, version: i32) -> rusqlite::Result<()> {
+        db.execute(&format!("PRAGMA user_version = {}", version), [])?;
+        Ok(())
+    }
+
+    fn ignore_foreign_keys(db: &Connection) -> rusqlite::Result<()> {
+        db.execute("PRAGMA foreign_keys = OFF", [])?;
+        Ok(())
+    }
+
+    fn acknowledge_foreign_keys(db: &Connection) -> rusqlite::Result<()> {
+        db.execute("PRAGMA foreign_keys = ON", [])?;
+        Ok(())
+    }
+
+    fn create_backup_tables(db: &Connection) -> rusqlite::Result<()> {
+        db.execute(
+            "CREATE TABLE templates_backup AS SELECT * FROM templates",
+            [],
+        )?;
+
+        db.execute(
+            "CREATE TABLE substitutes_backup AS SELECT * FROM substitutes",
+            [],
+        )?;
+
+        Ok(())
+    }
+
+    fn drop_tables(db: &Connection) -> rusqlite::Result<()> {
+        db.execute("DROP TABLE templates", [])?;
+        db.execute("DROP TABLE substitutes", [])?;
+        Ok(())
+    }
+
+    fn populate_tables(db: &Connection) -> rusqlite::Result<()> {
+        db.execute(
+            "INSERT OR IGNORE INTO templates (id, name) 
+             SELECT id, name FROM templates_backup",
+            [],
+        )?;
+
+        db.execute(
+            "INSERT OR IGNORE INTO substitutes (id, name, template_id) 
+             SELECT id, name, template_id FROM substitutes_backup",
+            [],
+        )?;
+
+        Ok(())
+    }
+
+    fn drop_backups(db: &Connection) -> rusqlite::Result<()> {
+        db.execute("DROP TABLE templates_backup", [])?;
+        db.execute("DROP TABLE substitutes_backup", [])?;
+        Ok(())
+    }
+
+    fn upgrade_to_version_1(db: &Connection) -> rusqlite::Result<()> {
+        Self::ignore_foreign_keys(db)?;
+        Self::create_backup_tables(db)?;
+        Self::drop_tables(db)?;
+        Self::create_tables(db)?;
+        Self::populate_tables(db)?;
+        Self::drop_backups(db)?;
+        Self::acknowledge_foreign_keys(db)?;
+        Self::set_schema_version(db, 1)?;
+        Ok(())
+    }
+
+    pub fn from_path(path: &str) -> rusqlite::Result<TemplateDatabase> {
+        let db = Connection::open(path)?;
+
+        Self::initialize_db(&db)?;
+
         Ok(TemplateDatabase { db })
+    }
+
+    fn find_template_id_with_transaction(
+        tx: &Transaction,
+        template: &str,
+    ) -> rusqlite::Result<String> {
+        let mut stmt = tx.prepare("SELECT id FROM templates WHERE name = ?1")?;
+        let template_id: i64 = stmt.query_row(&[template], |row| row.get(0))?;
+        Ok(template_id.to_string())
     }
 
     pub fn insert_sub<'a>(
@@ -38,7 +149,7 @@ impl TemplateDatabase {
         substitute: &'a str,
     ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
-        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let template_id = Self::find_template_id_with_transaction(&tx, template)?;
         let result = tx.execute(
             "INSERT OR IGNORE INTO substitutes (name, template_id) VALUES (?1, ?2)",
             [substitute.to_string(), template_id.to_string()],
@@ -47,26 +158,6 @@ impl TemplateDatabase {
         tx.commit()?;
 
         Ok(result > 0)
-    }
-
-    pub fn insert_subs<'a>(
-        &mut self,
-        template: &'a str,
-        substitutes: Option<&[&'a str]>,
-    ) -> rusqlite::Result<UpdatedValues<'a>> {
-        let mut change_log = UpdatedValues::new();
-
-        let tx = self.db.transaction()?;
-
-        TemplateDatabase::execute_insert_template(&tx, template)?;
-
-        if let Some(subs) = substitutes {
-            change_log = TemplateDatabase::execute_insert_subs(&tx, template, subs)?;
-        }
-
-        tx.commit()?;
-
-        Ok(change_log)
     }
 
     fn execute_insert_template(tx: &Transaction, template: &str) -> rusqlite::Result<()> {
@@ -82,7 +173,7 @@ impl TemplateDatabase {
         template: &str,
         substitutes: &[&'a str],
     ) -> rusqlite::Result<UpdatedValues<'a>> {
-        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let template_id = Self::find_template_id_with_transaction(&tx, template)?;
         let mut inserted_subs = UpdatedValues::new();
 
         for sub in substitutes {
@@ -98,26 +189,29 @@ impl TemplateDatabase {
         Ok(inserted_subs)
     }
 
-    fn find_template_id(&self, template: &str) -> rusqlite::Result<String> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT id FROM templates WHERE name = ?1")?;
-        let template_id: i64 = stmt.query_row(&[template], |row| row.get(0))?;
-        Ok(template_id.to_string())
-    }
+    pub fn insert_subs<'a>(
+        &mut self,
+        template: &'a str,
+        substitutes: Option<&[&'a str]>,
+    ) -> rusqlite::Result<UpdatedValues<'a>> {
+        let mut change_log = UpdatedValues::new();
 
-    fn find_template_id_with_transaction(
-        tx: &Transaction,
-        template: &str,
-    ) -> rusqlite::Result<String> {
-        let mut stmt = tx.prepare("SELECT id FROM templates WHERE name = ?1")?;
-        let template_id: i64 = stmt.query_row(&[template], |row| row.get(0))?;
-        Ok(template_id.to_string())
+        let tx = self.db.transaction()?;
+
+        Self::execute_insert_template(&tx, template)?;
+
+        if let Some(subs) = substitutes {
+            change_log = Self::execute_insert_subs(&tx, template, subs)?;
+        }
+
+        tx.commit()?;
+
+        Ok(change_log)
     }
 
     pub fn remove_template(&mut self, template: &str) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
-        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let template_id = Self::find_template_id_with_transaction(&tx, template)?;
 
         tx.execute(
             "DELETE FROM substitutes WHERE template_id = ?1",
@@ -137,7 +231,7 @@ impl TemplateDatabase {
         substitute: &'a str,
     ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
-        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let template_id = Self::find_template_id_with_transaction(&tx, template)?;
 
         let result = tx.execute(
             "DELETE FROM substitutes WHERE template_id = ?1 AND name = ?2",
@@ -155,7 +249,7 @@ impl TemplateDatabase {
         substitutes: &[&'a str],
     ) -> rusqlite::Result<UpdatedValues<'a>> {
         let tx = self.db.transaction()?;
-        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let template_id = Self::find_template_id_with_transaction(&tx, template)?;
 
         let mut removed_subs = UpdatedValues::new();
 
@@ -199,7 +293,7 @@ impl TemplateDatabase {
     ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
 
-        let template_id = TemplateDatabase::find_template_id_with_transaction(&tx, template)?;
+        let template_id = Self::find_template_id_with_transaction(&tx, template)?;
 
         let result = tx.execute(
             "UPDATE substitutes SET name = ?1 WHERE name = ?2 AND template_id = ?3",
@@ -215,6 +309,14 @@ impl TemplateDatabase {
         self.db.execute("DELETE FROM substitutes", [])?;
         self.db.execute("DELETE FROM templates", [])?;
         Ok(())
+    }
+
+    fn find_template_id(&self, template: &str) -> rusqlite::Result<String> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id FROM templates WHERE name = ?1")?;
+        let template_id: i64 = stmt.query_row(&[template], |row| row.get(0))?;
+        Ok(template_id.to_string())
     }
 
     pub fn get_subs(&self, template: &str) -> rusqlite::Result<Vec<String>> {

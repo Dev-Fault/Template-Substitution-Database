@@ -149,6 +149,7 @@ impl TemplateDatabase {
         substitute: &'a str,
     ) -> rusqlite::Result<bool> {
         let tx = self.db.transaction()?;
+        Self::execute_insert_template(&tx, template)?;
         let template_id = Self::find_template_id_with_transaction(&tx, template)?;
         let result = tx.execute(
             "INSERT OR IGNORE INTO substitutes (name, template_id) VALUES (?1, ?2)",

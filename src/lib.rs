@@ -3,6 +3,7 @@ use rusqlite::{Connection, Transaction};
 
 const DATABASE_VERSION: i32 = 1;
 
+#[derive(Debug)]
 pub struct TemplateDatabase {
     db: Connection,
 }
